@@ -1,0 +1,45 @@
+general:
+  seed: 42
+model:
+  init:
+    doc_model: huawei-noah/TinyBERT_General_4L_312D
+    tokenizer: ${model.init.doc_model}
+    device: cuda
+    aggregation_mode: mean
+    embedding_size: 312
+    save_model: tinybert
+    specialized_mode: variant_all
+    max_tokenizer_length: 256
+    normalize: false
+    temperature: 1
+  adapters:
+    num_experts_to_use: 3
+    num_experts: 3
+    residual: true
+    latent_size: 192
+    non_linearity: relu
+    use_adapters: true
+  continue_train: false
+training:
+  lr: 0.0001
+  batch_size: 1024
+  max_epoch: 30
+testing:
+  data_dir: ../msmarco
+  corpus_path: ${testing.data_dir}/corpus.jsonl
+  query_path: ${testing.data_dir}/msmarco-test2019-queries-43.jsonl
+  qrels_path: ${testing.data_dir}/2019qrels-pass.json
+  bm25_run_path: ${testing.data_dir}/bm25_run.lz4
+  corpus_logits: ${dataset.data_dir}/blooms/msmarco_logits.jsonl
+  embedding_dir: ${dataset.output_dir}/embeddings
+  rerank: false
+dataset:
+  data_dir: ../msmarco
+  corpus_path: ${dataset.data_dir}/corpus.jsonl
+  query_path: ${dataset.data_dir}/train_queries.jsonl
+  qrels_path: ${dataset.data_dir}/qrels/train.tsv
+  val_split: 0.05
+  output_dir: output/msmarco
+  model_dir: ${dataset.output_dir}/saved_models
+  logs_dir: ${dataset.output_dir}/logs
+  runs_dir: ${dataset.output_dir}/runs

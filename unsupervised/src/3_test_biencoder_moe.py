@@ -24,7 +24,7 @@ import random
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 
-from deepview import DeepView
+from deepview.DeepViewIR import DeepViewIR
 from deepview.evaluate import evaluate_umap
 from deepview.evaluate import leave_one_out_knn_dist_err
 
@@ -308,7 +308,7 @@ def main(cfg: DictConfig):
         interactive = False
         my_title = "MOE Enhanced DRM - Deepview"
 
-        deepview = DeepView(pred_wrapper, classes, max_samples, batch_size, data_shape,
+        deepview = DeepViewIR(pred_wrapper, classes, max_samples, batch_size, data_shape,
                                                 N, lam, resolution, cmap, interactive, my_title, metric=metric,
                                                 disc_dist=disc_dist, relevant_docs=relevant_indices)
 
@@ -321,47 +321,12 @@ def main(cfg: DictConfig):
         plt.close(fig)
 
         q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_pred)
-        print('Lambda: %.2f - Pred. Val. Q_kNN: %.3f' % (1, q_knn))
+        print('Lambda: %.2f - Pred. Val. Q_kNN: %.3f' % (lam, q_knn))
 
         q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_true)
-        print('Lambda: %.2f - True Val. Q_kNN: %.3f' % (1, q_knn))
+        print('Lambda: %.2f - True Val. Q_kNN: %.3f' % (lam, q_knn))
         # ipdb.set_trace()
         # deepview.save_fig(os.path.join(dv_dir, f"deepview_query_{query_id}_experts{cfg.model.adapters.num_experts}.png"))
-
-    ############################
-    # 3D t-SNE
-    ############################
-    # # for i in range(40):
-    # # import time
-    # # random.seed(time.time())  # Changes every run
-    # # random_query = random.choice(data)
-    # # query_id = random_query['_id']
-    # for query_id in qids:
-    #     # query_id = "1133579"
-    #     # random_query = data.get(query_id)
-    #     # print(f"Selected query ID: {query_id}")
-    #     query_data = data.get(query_id)
-    #     if query_data is None:
-    #         print(f"Query ID {query_id} not found in data, skipping.")
-    #         continue
-    #     print(f"Selected query ID: {query_id}")
-
-    #     # query
-    #     model.eval()
-    #     with torch.no_grad():
-    #         query_embedding = model.query_encoder([query_data['text']]).to(cfg.model.init.device)
-
-    #     # Get top 1000 docs
-    #     topk_ids = list(bert_run[query_id].keys())[:1000]
-    #     topk_indices = [id_to_index[doc_id] for doc_id in topk_ids]
-    #     top_doc_embeddings = doc_embedding[topk_indices]
-    #     top_doc_expert_ids = [int(all_expert_ids[i]) for i in topk_indices]
-    #     relevants_dict = ranx_qrels.to_dict()
-    #     relevants = set(relevants_dict.get(query_id, {}).keys())
-
-    #     # Generate and save t-SNE
-    #     visualize_tsne(query_embedding, top_doc_embeddings, topk_ids, query_id, tsne_dir, top_doc_expert_ids, relevants, use_adapters=cfg.model.adapters.use_adapters)
-    ############################
 
 if __name__ == '__main__':
     main()

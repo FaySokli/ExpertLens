@@ -1,0 +1,8 @@
+data_dir: ../nq
+corpus_path: ${testing.data_dir}/corpus.jsonl
+query_path: ${testing.data_dir}/queries.jsonl
+qrels_path: ${testing.data_dir}/qrels.json
+bm25_run_path: ${testing.data_dir}/bm25_run.lz4
+corpus_logits: ${testing.data_dir}/blooms/nq_logits.jsonl
+embedding_dir: ${dataset.output_dir}/embeddings
+rerank: False

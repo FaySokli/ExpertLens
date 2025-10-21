@@ -40,7 +40,7 @@ def train_dv_cls(embeddings, labels, model, optimizer, loss_fn, device, batch_si
 
         total_loss += loss.item() * batch_embs.size(0)
         preds = logits.argmax(dim=1)
-        correct += (preds == batch_labels).sum().item()
+        correct += (preds == batch_labels.argmax(dim=1)).sum().item()
         total += batch_labels.size(0)
 
     train_loss = total_loss / total
@@ -110,11 +110,20 @@ def main(cfg: DictConfig) -> None:
     softmaxed_logits = torch.stack([softmax_logits_map.get(doc_id) for doc_id in sorted_doc_ids]).to("cpu")
     del softmax_logits_map, doc_embedding, doc_logits, logits_map
 
+    class_labels = softmaxed_logits.argmax(dim=1)  # convert to integer class labels
     X_train, X_temp, y_train, y_temp = train_test_split(
-        doc_embedding_sorted, softmaxed_logits, test_size=0.2, stratify=softmaxed_logits, random_state=42
+        doc_embedding_sorted, softmaxed_logits,
+        test_size=0.2,
+        stratify=class_labels,
+        random_state=42
     )
+
+    temp_labels = y_temp.argmax(dim=1)
     X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.05, stratify=y_temp, random_state=42
+        X_temp, y_temp,
+        test_size=0.05,
+        stratify=temp_labels,
+        random_state=42
     )
 
     # -------------------------------
@@ -140,12 +149,12 @@ def main(cfg: DictConfig) -> None:
     for epoch in tqdm.tqdm(range(max_epoch), leave=True):
         # Train
         model.train()
-        avg_train_loss = train_dv_cls(X_train, y_train, model, optimizer, loss_fn, device, batch_size)
+        avg_train_loss = train_dv_cls(X_train, y_train, model, optimizer, loss_fn, cfg.model.init.device, batch_size)
         logging.info(f"TRAIN EPOCH: {epoch + 1:3d}, Average Loss: {avg_train_loss:.5e}")
 
         # Validate
         model.eval()
-        val_loss = validate_dv_cls(X_val, y_val, model, loss_fn, batch_size, device)
+        val_loss = validate_dv_cls(X_val, y_val, model, loss_fn, batch_size, cfg.model.init.device)
         logging.info(f"VAL EPOCH: {epoch + 1:3d}, Average Val Loss: {val_loss:.5e}")
 
         # Save best model checkpoint
@@ -157,14 +166,14 @@ def main(cfg: DictConfig) -> None:
             logging.info(f'Saved checkpoint: {checkpoint_path}')
 
     # Test
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=cfg.model.init.device))
     model.eval()
-    test_loss = validate_dv_cls(X_test, y_test, model, loss_fn, batch_size, device)
+    test_loss = validate_dv_cls(X_test, y_test, model, loss_fn, batch_size, cfg.model.init.device)
 
     with torch.no_grad():
-        logits = model(X_test.to(device))
+        logits = model(X_test.to(cfg.model.init.device))
         preds = logits.argmax(dim=1).cpu()
-        test_acc = (preds == y_test).float().mean().item()
+        test_acc = (preds == y_test.argmax(dim=1)).float().mean().item()
 
     logging.info(f"TEST RESULTS -> Loss: {test_loss:.5e}, Accuracy: {test_acc:.4f}")
     print(f"TEST RESULTS -> Loss: {test_loss:.5e}, Accuracy: {test_acc:.4f}")

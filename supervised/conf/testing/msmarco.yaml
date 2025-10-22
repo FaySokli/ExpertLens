@@ -4,5 +4,6 @@ query_path: ${testing.data_dir}/dev_queries.jsonl
 qrels_path: ${testing.data_dir}/qrels.json
 bm25_run_path: ${testing.data_dir}/bm25_run.lz4
 corpus_logits: ${dataset.data_dir}/blooms/msmarco_logits.jsonl
+corpus_labels: ${dataset.data_dir}/blooms/msmarco_labels.jsonl
 embedding_dir: ${dataset.output_dir}/embeddings
 rerank: False

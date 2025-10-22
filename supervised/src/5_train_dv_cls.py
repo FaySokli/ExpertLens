@@ -40,7 +40,7 @@ def train_dv_cls(embeddings, labels, model, optimizer, loss_fn, device, batch_si
 
         total_loss += loss.item() * batch_embs.size(0)
         preds = logits.argmax(dim=1)
-        correct += (preds == batch_labels.argmax(dim=1)).sum().item()
+        correct += (preds == batch_labels).sum().item()
         total += batch_labels.size(0)
 
     train_loss = total_loss / total
@@ -90,39 +90,34 @@ def main(cfg: DictConfig) -> None:
     doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
     # doc_embedding = doc_embedding.half()
 
-    doc_logits = Indxr(cfg.testing.corpus_logits, key_id='_id')
-    logits_map = {doc['_id']: doc['logits'] for doc in doc_logits}
-    softmax_logits_map = {
-    _id: torch.softmax(torch.tensor(logits, dtype=torch.float32)/10, dim=-1).to(cfg.model.init.device)
-    for _id, logits in logits_map.items()
-    }
+    #####################################
+    doc_labels = Indxr(cfg.testing.corpus_labels, key_id='_id')
+    labels_map = {str(doc['_id']): int(doc['category']) for doc in doc_labels}
+    #####################################
     
     with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
         id_to_index = json.load(f)
-    
-    # with open(cfg.testing.bm25_run_path, 'r') as f:
-    #     bm25_run = json.load(f)
 
     index_to_id = {ind: _id for _id, ind in id_to_index.items()}
     sorted_doc_ids = [index_to_id[i] for i in range(len(index_to_id))]
     sorted_indices = [id_to_index[doc_id] for doc_id in sorted_doc_ids]
-    doc_embedding_sorted = doc_embedding[sorted_indices].to("cpu")
-    softmaxed_logits = torch.stack([softmax_logits_map.get(doc_id) for doc_id in sorted_doc_ids]).to("cpu")
-    del softmax_logits_map, doc_embedding, doc_logits, logits_map
+    doc_embedding_sorted = doc_embedding[sorted_indices]
+    del doc_embedding
 
-    class_labels = softmaxed_logits.argmax(dim=1)  # convert to integer class labels
+    label_list = [int(labels_map[doc_id]) for doc_id in sorted_doc_ids]
+    labels_tensor = torch.tensor(label_list, dtype=torch.long)
+
     X_train, X_temp, y_train, y_temp = train_test_split(
-        doc_embedding_sorted, softmaxed_logits,
+        doc_embedding_sorted, labels_tensor,
         test_size=0.2,
-        stratify=class_labels,
+        stratify=labels_tensor,
         random_state=42
-    )
+)
 
-    temp_labels = y_temp.argmax(dim=1)
     X_val, X_test, y_val, y_test = train_test_split(
         X_temp, y_temp,
         test_size=0.05,
-        stratify=temp_labels,
+        stratify=y_temp,
         random_state=42
     )
 
@@ -172,8 +167,8 @@ def main(cfg: DictConfig) -> None:
 
     with torch.no_grad():
         logits = model(X_test.to(cfg.model.init.device))
-        preds = logits.argmax(dim=1).cpu()
-        test_acc = (preds == y_test.argmax(dim=1)).float().mean().item()
+        preds = logits.argmax(dim=1)
+        test_acc = (preds == y_test).float().mean().item()
 
     logging.info(f"TEST RESULTS -> Loss: {test_loss:.5e}, Accuracy: {test_acc:.4f}")
     print(f"TEST RESULTS -> Loss: {test_loss:.5e}, Accuracy: {test_acc:.4f}")

@@ -156,7 +156,7 @@ def main(cfg: DictConfig) -> None:
         if val_loss < best_val_loss:
             logging.info(f'Found new best cls model on epoch {epoch + 1}, new best validation loss {val_loss:.5e}')
             best_val_loss = val_loss
-            checkpoint_path = os.path.join(dv_dir, "deepview_cls2.pt")
+            checkpoint_path = os.path.join(dv_dir, "deepview_cls.pt")
             torch.save(model.state_dict(), checkpoint_path)
             logging.info(f'Saved checkpoint: {checkpoint_path}')
 
@@ -167,7 +167,7 @@ def main(cfg: DictConfig) -> None:
 
     with torch.no_grad():
         logits = model(X_test.to(cfg.model.init.device))
-        preds = logits.argmax(dim=1)
+        preds = logits.argmax(dim=1).cpu()
         test_acc = (preds == y_test).float().mean().item()
 
     logging.info(f"TEST RESULTS -> Loss: {test_loss:.5e}, Accuracy: {test_acc:.4f}")

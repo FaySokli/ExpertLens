@@ -89,12 +89,12 @@ hydra:
     - testing=msmarco
     - model.adapters.use_adapters=True
     - model.adapters.num_experts=6
-    - model.init.specialized_mode=blooms_all
+    - model.init.specialized_mode=densec3_w
     - model.init.device=cuda:1
   job:
     name: 5_train_dv_cls
     chdir: true
-    override_dirname: dataset=msmarco,model.adapters.num_experts=6,model.adapters.use_adapters=True,model.init.device=cuda:1,model.init.specialized_mode=blooms_all,model=tinybert,testing=msmarco
+    override_dirname: dataset=msmarco,model.adapters.num_experts=6,model.adapters.use_adapters=True,model.init.device=cuda:1,model.init.specialized_mode=densec3_w,model=tinybert,testing=msmarco
     id: ???
     num: ???
     config_name: config

@@ -8,7 +8,7 @@ model:
     pooling_mode: mean
     embedding_size: 312
     save_model: tinybert
-    specialized_mode: blooms_all
+    specialized_mode: densec3_w
     max_tokenizer_length: 256
     normalize: false
     temperature: 1

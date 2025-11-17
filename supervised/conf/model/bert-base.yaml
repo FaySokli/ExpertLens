@@ -5,7 +5,7 @@ init:
   pooling_mode: 'mean'
   embedding_size: 768
   save_model: 'bert-base'
-  specialized_mode: 'blooms_all'
+  specialized_mode: 'densec3_w'
   max_tokenizer_length: 256
   normalize: False
   temperature: 1

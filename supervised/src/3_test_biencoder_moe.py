@@ -111,7 +111,7 @@ def get_full_bert_rank(data, model, doc_embedding, softmaxed_logits, index_to_id
             # with torch.autocast(device_type=device):
             q_encoded = model.encoder_no_moe([q['text']])
 
-            if model.specialized_mode == 'blooms_top1':
+            if model.specialized_mode == 'densec3_top1':
                 q_embedding = model.embedder_q_inf(q_encoded).half()
                 q_embedding = torch.einsum('md,nm->nd', q_embedding.squeeze(0), softmaxed_logits.half()) + q_encoded
                 q_embedding = q_embedding.half()
@@ -122,7 +122,7 @@ def get_full_bert_rank(data, model, doc_embedding, softmaxed_logits, index_to_id
                 bert_scores = torch.einsum('nd,nd->n', doc_embedding, q_embedding)
                 doc_embedding = doc_embedding.to("cpu")
                 
-            elif model.specialized_mode == 'blooms_all':
+            elif model.specialized_mode == 'densec3_w':
                 q_embedding = model.embedder_q(q_encoded).half()
                 doc_embedding = doc_embedding.to(device)
                 bert_scores = torch.einsum('xy, ly -> x', doc_embedding, q_embedding)

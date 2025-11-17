@@ -3,5 +3,5 @@
 - testing=msmarco
 - model.adapters.use_adapters=True
 - model.adapters.num_experts=6
-- model.init.specialized_mode=blooms_all
+- model.init.specialized_mode=densec3_w
 - model.init.device=cuda:1

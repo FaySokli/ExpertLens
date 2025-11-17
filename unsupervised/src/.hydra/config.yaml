@@ -4,7 +4,7 @@ model:
   init:
     doc_model: huawei-noah/TinyBERT_General_4L_312D
     tokenizer: ${model.init.doc_model}
-    device: cuda
+    device: cuda:0
     aggregation_mode: mean
     embedding_size: 312
     save_model: tinybert
@@ -21,13 +21,13 @@ model:
   continue_train: false
 training:
   lr: 0.0001
-  batch_size: 1024
+  batch_size: 64
   max_epoch: 30
 testing:
   data_dir: ../msmarco
   corpus_path: ${testing.data_dir}/corpus.jsonl
-  query_path: ${testing.data_dir}/msmarco-test2019-queries-43.jsonl
-  qrels_path: ${testing.data_dir}/2019qrels-pass.json
+  query_path: ${testing.data_dir}/msmarco-test2020-queries-54.jsonl
+  qrels_path: ${testing.data_dir}/2020qrels-pass.json
   bm25_run_path: ${testing.data_dir}/bm25_run.lz4
   corpus_logits: ${dataset.data_dir}/blooms/msmarco_logits.jsonl
   embedding_dir: ${dataset.output_dir}/embeddings

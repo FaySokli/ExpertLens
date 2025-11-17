@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import ipdb
+from collections import Counter, defaultdict
 
 import hydra
 import torch
@@ -88,23 +89,106 @@ def visualize_tsne(query_embedding, top_doc_embeddings, top_doc_ids, query_id, o
     plt.close()
     print(f"Saved t-SNE plot: {save_path}")
 
-def get_full_bert_rank(data, model, doc_embedding, id_to_index, k=1000):
+def get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, use_adapters, k=1000):
+    """
+    Get ranking and compute knn + expert distributions
+    """
     bert_run = {}
     index_to_id = {ind: _id for _id, ind in id_to_index.items()}
+    
+    # knn and expert distributions
+    k_values = [1, 5, 10, 20, 50, 100, 200, 1000]
+    relevance_counts = {k: [] for k in k_values}
+    doc_expert_counter = Counter()
+    query_expert_counter = Counter()
+    matching_queries = []
+    mismatching_queries = []
+    queries_without_relevants = []
+    query_embeddings = {}
+    
+    relevants_dict = ranx_qrels.to_dict()
+    
     model.eval()
     for d in tqdm.tqdm(data, total=len(data)):
+        query_id = d['_id']
+        
         with torch.no_grad():
-            # with torch.autocast(device_type=model.device):
             q_embedding = model.query_encoder([d['text']])
         
+        # Store query embedding for later use
+        query_embeddings[query_id] = q_embedding
+        
+        # Get query expert if using adapters
+        query_expert = None
+        if use_adapters:
+            with torch.no_grad():
+                expert_probs = model.cls(q_embedding)  # [1, num_experts]
+                query_expert = torch.argmax(expert_probs, dim=1).item()
+                query_expert_counter[query_expert] += 1
+        
+        # Compute scores and ranking
         bert_scores = torch.einsum('xy, ly -> x', doc_embedding, q_embedding)
         index_sorted = torch.argsort(bert_scores, descending=True)
         top_k = index_sorted[:k]
         bert_ids = [index_to_id[int(_id)] for _id in top_k]
         bert_scores = bert_scores[top_k]
-        bert_run[d['_id']] = {doc_id: bert_scores[i].item() for i, doc_id in enumerate(bert_ids)}
+        bert_run[query_id] = {doc_id: bert_scores[i].item() for i, doc_id in enumerate(bert_ids)}
         
+        # Count document experts in top-1000
+        if use_adapters:
+            for idx in top_k:
+                doc_expert = int(all_expert_ids[idx])
+                doc_expert_counter[doc_expert] += 1
         
+        # Analyze relevant documents
+        relevants = set(relevants_dict.get(query_id, {}).keys())
+        
+        if not relevants:
+            queries_without_relevants.append(query_id)
+            for k_val in k_values:
+                relevance_counts[k_val].append(0)
+            continue
+        
+        # Count relevant docs in top-k
+        for k_val in k_values:
+            topk_subset = bert_ids[:k_val]
+            num_relevants = len([doc_id for doc_id in topk_subset if doc_id in relevants])
+            relevance_counts[k_val].append(num_relevants)
+        
+        # Check query vs top-1 relevant expert matching
+        if use_adapters:
+            top1_relevant_doc_id = None
+            top1_relevant_expert = None
+            
+            for doc_id in bert_ids:
+                if doc_id in relevants:
+                    top1_relevant_doc_id = doc_id
+                    doc_idx = id_to_index[doc_id]
+                    top1_relevant_expert = int(all_expert_ids[doc_idx])
+                    break
+            
+            if top1_relevant_expert is not None:
+                if query_expert == top1_relevant_expert:
+                    matching_queries.append(query_id)
+                else:
+                    mismatching_queries.append({
+                        'query_id': query_id,
+                        'query_expert': query_expert,
+                        'top1_relevant_doc_id': top1_relevant_doc_id,
+                        'top1_relevant_expert': top1_relevant_expert
+                    })
+    
+    analysis_results = {
+        'relevance_counts': relevance_counts,
+        'doc_expert_counter': doc_expert_counter,
+        'query_expert_counter': query_expert_counter,
+        'matching_queries': matching_queries,
+        'mismatching_queries': mismatching_queries,
+        'queries_without_relevants': queries_without_relevants,
+        'k_values': k_values
+    }
+    print("KNN and Expert Distribution Analysis Results:")
+    print(analysis_results)
     return bert_run
     
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
@@ -173,27 +257,7 @@ def main(cfg: DictConfig):
         id_to_index = json.load(f)
         
     data = Indxr(cfg.testing.query_path, key_id='_id')
-    bert_run = get_full_bert_rank(data, model, doc_embedding, id_to_index, 1000)
-        
-    # with open(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_biencoder.json', 'w') as f:
-    #     json.dump(bert_run, f)
-    
-    ranx_qrels = Qrels.from_file(cfg.testing.qrels_path)
-    ranx_run = Run(bert_run, 'FullRun')
-    models = [ranx_run]
-
-    if cfg.model.adapters.use_adapters:
-        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-{cfg.model.init.specialized_mode}.json')
-    else:
-        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-ft.json')
-    
-    evaluation_report = compare(ranx_qrels, models, ['map@100', 'mrr@10', 'recall@100', 'ndcg@10', 'precision@1', 'ndcg@3'])
-    print(evaluation_report)
-    logging.info(f"Results for {cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder.json:\n{evaluation_report}")
-
     ############################
-    # Create directory for t-SNE and DeepView plots
-    # qids = ["67316", "135802", "324585", "1051399", "1113256", "1127540", "1136962"]
     tsne_dir = os.path.join(cfg.dataset.output_dir, 'tsne_plots')
     os.makedirs(tsne_dir, exist_ok=True)
 
@@ -210,93 +274,106 @@ def main(cfg: DictConfig):
 
     all_doc_embeddings_np = np.load(np_embedding_path)
     all_expert_ids = np.load(expert_ids_path)
+    ranx_qrels = Qrels.from_file(cfg.testing.qrels_path)
+    bert_run = get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, cfg.model.adapters.use_adapters, 1000)
+    ranx_run = Run(bert_run, 'FullRun')
+    models = [ranx_run]
 
-    ############################
-    # DeepView
-    ############################
-    for i in range(43):
-        import time
-        random.seed(time.time())  # Changes every run
-        random_query = random.choice(data)
-        query_id = random_query['_id']
-        print(f"Selected query ID: {query_id}")
-        query_data = data.get(query_id)
-        if query_data is None:
-            print(f"Query ID {query_id} not found in data, skipping.")
+    if cfg.model.adapters.use_adapters:
+        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-{cfg.model.init.specialized_mode}.json')
+    else:
+        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-ft.json')
+    
+    evaluation_report = compare(ranx_qrels, models, ['map@100', 'mrr@10', 'recall@100', 'ndcg@10', 'precision@1', 'ndcg@3'])
+    print(evaluation_report)
+    logging.info(f"Results for {cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder.json:\n{evaluation_report}")
 
-        # query
-        model.eval()
-        with torch.no_grad():
-            query_embedding = model.query_encoder([query_data['text']]).to(cfg.model.init.device)
+    # ############################
+    # # DeepView
+    # ############################
+    # for i in range(43):
+    #     import time
+    #     random.seed(time.time())  # Changes every run
+    #     random_query = random.choice(data)
+    #     query_id = random_query['_id']
+    #     print(f"Selected query ID: {query_id}")
+    #     query_data = data.get(query_id)
+    #     if query_data is None:
+    #         print(f"Query ID {query_id} not found in data, skipping.")
 
-        # Get top 1000 docs
-        topk_ids = list(bert_run[query_id].keys())[:1000]
-        topk_indices = [id_to_index[doc_id] for doc_id in topk_ids]
-        top_doc_embeddings = doc_embedding[topk_indices]
-        top_doc_expert_ids = [int(all_expert_ids[i]) for i in topk_indices]
-        relevants_dict = ranx_qrels.to_dict()
-        relevants = set(relevants_dict.get(query_id, {}).keys())
-        relevant_indices = [
-            i+1
-            for i, doc_id in enumerate(topk_ids)
-            if doc_id in relevants
-        ]
+    #     # query
+    #     model.eval()
+    #     with torch.no_grad():
+    #         query_embedding = model.query_encoder([query_data['text']]).to(cfg.model.init.device)
 
-        # Generate and save DeepView plot
-        all_embeddings = torch.cat([query_embedding, top_doc_embeddings], dim=0)
-        with torch.no_grad():
-            probs = dv_cls(all_embeddings.float().to(cfg.model.init.device)).softmax(dim=1).cpu().numpy()
-        relevant_set = set(relevants)
-        X = all_embeddings.detach().cpu().numpy()
-        y = np.argmax(probs, axis=1)
+    #     # Get top 1000 docs
+    #     topk_ids = list(bert_run[query_id].keys())[:1000]
+    #     topk_indices = [id_to_index[doc_id] for doc_id in topk_ids]
+    #     top_doc_embeddings = doc_embedding[topk_indices]
+    #     top_doc_expert_ids = [int(all_expert_ids[i]) for i in topk_indices]
+    #     relevants_dict = ranx_qrels.to_dict()
+    #     relevants = set(relevants_dict.get(query_id, {}).keys())
+    #     relevant_indices = [
+    #         i+1
+    #         for i, doc_id in enumerate(topk_ids)
+    #         if doc_id in relevants
+    #     ]
 
-        def pred_wrapper(x):
-            with torch.no_grad():
-                x = torch.from_numpy(x).float().to(cfg.model.init.device)
-                pred = dv_cls(x).softmax(dim=1).cpu().numpy()
-            return pred
+    #     # Generate and save DeepView plot
+    #     all_embeddings = torch.cat([query_embedding, top_doc_embeddings], dim=0)
+    #     with torch.no_grad():
+    #         probs = dv_cls(all_embeddings.float().to(cfg.model.init.device)).softmax(dim=1).cpu().numpy()
+    #     relevant_set = set(relevants)
+    #     X = all_embeddings.detach().cpu().numpy()
+    #     y = np.argmax(probs, axis=1)
+
+    #     def pred_wrapper(x):
+    #         with torch.no_grad():
+    #             x = torch.from_numpy(x).float().to(cfg.model.init.device)
+    #             pred = dv_cls(x).softmax(dim=1).cpu().numpy()
+    #         return pred
         
-        # --- Deep View Parameters ----
-        use_case = "nlp"
-        classes = np.arange(cfg.model.adapters.num_experts)
-        batch_size = cfg.training.batch_size
-        max_samples = 1001  # including query
-        data_shape = (cfg.model.init.embedding_size,)
-        resolution = 100
-        N = 10
-        lam = .6
-        cmap = 'tab10'
-        metric = 'cosine'
-        disc_dist = (
-            False
-            if lam == 1
-            else True
-        )
-        # to make sure deepview.show is blocking,
-        # disable interactive mode
-        interactive = False
-        my_title = "MOE Enhanced DRM - Deepview"
+    #     # --- Deep View Parameters ----
+    #     use_case = "nlp"
+    #     classes = np.arange(cfg.model.adapters.num_experts)
+    #     batch_size = cfg.training.batch_size
+    #     max_samples = 1001  # including query
+    #     data_shape = (cfg.model.init.embedding_size,)
+    #     resolution = 100
+    #     N = 10
+    #     lam = .6
+    #     cmap = 'tab10'
+    #     metric = 'cosine'
+    #     disc_dist = (
+    #         False
+    #         if lam == 1
+    #         else True
+    #     )
+    #     # to make sure deepview.show is blocking,
+    #     # disable interactive mode
+    #     interactive = False
+    #     my_title = "MOE Enhanced DRM - Deepview"
 
-        deepview = DeepViewIR(pred_wrapper, classes, max_samples, batch_size, data_shape,
-                                                N, lam, resolution, cmap, interactive, my_title, metric=metric,
-                                                disc_dist=disc_dist, relevant_docs=relevant_indices)
+    #     deepview = DeepViewIR(pred_wrapper, classes, max_samples, batch_size, data_shape,
+    #                                             N, lam, resolution, cmap, interactive, my_title, metric=metric,
+    #                                             disc_dist=disc_dist, relevant_docs=relevant_indices)
 
 
-        deepview.add_samples(X, y)
-        deepview.show()
-        # ipdb.set_trace()
-        fig = plt.gcf()
-        fig.savefig(os.path.join(dv_dir, f"TREC19 - deepview_query_{query_id}_experts{cfg.model.adapters.num_experts}.png"), dpi=300)
-        plt.close(fig)
+    #     deepview.add_samples(X, y)
+    #     deepview.show()
+    #     # ipdb.set_trace()
+    #     fig = plt.gcf()
+    #     fig.savefig(os.path.join(dv_dir, f"TREC19 - deepview_query_{query_id}_experts{cfg.model.adapters.num_experts}.png"), dpi=300)
+    #     plt.close(fig)
 
-        q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_pred)
-        print('Lambda: %.2f - Pred. Val. Q_kNN: %.3f' % (lam, q_knn))
+    #     q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_pred)
+    #     print('Lambda: %.2f - Pred. Val. Q_kNN: %.3f' % (lam, q_knn))
 
-        q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_true)
-        print('Lambda: %.2f - True Val. Q_kNN: %.3f' % (lam, q_knn))
-        # ipdb.set_trace()
-        # deepview.save_fig(os.path.join(dv_dir, f"deepview_query_{query_id}_experts{cfg.model.adapters.num_experts}.png"))
-    ############################
+    #     q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_true)
+    #     print('Lambda: %.2f - True Val. Q_kNN: %.3f' % (lam, q_knn))
+    #     # ipdb.set_trace()
+    #     # deepview.save_fig(os.path.join(dv_dir, f"deepview_query_{query_id}_experts{cfg.model.adapters.num_experts}.png"))
+    # ############################
 
 if __name__ == '__main__':
     main()

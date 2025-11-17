@@ -86,14 +86,15 @@ hydra:
     task:
     - model=tinybert
     - dataset=msmarco
-    - testing=trec19
+    - testing=trec20
     - model.adapters.use_adapters=True
     - model.adapters.num_experts=3
     - model.init.specialized_mode=sbmoe_all
+    - model.init.device=cuda:0
   job:
-    name: 3_test_biencoder_moe
+    name: 3_test
     chdir: true
-    override_dirname: dataset=msmarco,model.adapters.num_experts=3,model.adapters.use_adapters=True,model.init.specialized_mode=sbmoe_all,model=tinybert,testing=trec19
+    override_dirname: dataset=msmarco,model.adapters.num_experts=3,model.adapters.use_adapters=True,model.init.device=cuda:0,model.init.specialized_mode=sbmoe_all,model=tinybert,testing=trec20
     id: ???
     num: ???
     config_name: config
@@ -107,21 +108,21 @@ hydra:
   runtime:
     version: 1.3.2
     version_base: '1.3'
-    cwd: /home/ubuntu/esokli/DenseIRMoE/src
+    cwd: /home/ubuntu/esokli/DeepViewIR/unsupervised/src
     config_sources:
     - path: hydra.conf
       schema: pkg
       provider: hydra
-    - path: /home/ubuntu/esokli/DenseIRMoE/conf
+    - path: /home/ubuntu/esokli/DeepViewIR/unsupervised/conf
       schema: file
       provider: main
     - path: ''
       schema: structured
       provider: schema
-    output_dir: /home/ubuntu/esokli/DenseIRMoE/src
+    output_dir: /home/ubuntu/esokli/DeepViewIR/unsupervised/src
     choices:
       dataset: msmarco
-      testing: trec19
+      testing: trec20
       model: tinybert
       training: tinybert
       hydra/env: default

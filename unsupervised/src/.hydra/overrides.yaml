@@ -2,6 +2,5 @@
 - dataset=msmarco
 - testing=trec19
 - model.adapters.use_adapters=True
-- model.adapters.num_experts_to_use=3
 - model.adapters.num_experts=3
 - model.init.specialized_mode=sbmoe_all

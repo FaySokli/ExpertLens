@@ -13,7 +13,6 @@ model:
     normalize: false
     temperature: 1
   adapters:
-    num_experts_to_use: 3
     num_experts: 3
     residual: true
     latent_size: 192

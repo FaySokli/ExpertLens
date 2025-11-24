@@ -89,7 +89,7 @@ def visualize_tsne(query_embedding, top_doc_embeddings, top_doc_ids, query_id, o
     plt.close()
     print(f"Saved t-SNE plot: {save_path}")
 
-def get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, use_adapters, k=1000):
+def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, use_adapters, k=1000, output_dir=None):
     """
     Get ranking and compute knn + expert distributions
     """
@@ -104,9 +104,14 @@ def get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, 
     matching_queries = []
     mismatching_queries = []
     queries_without_relevants = []
-    query_embeddings = {}
     
     relevants_dict = ranx_qrels.to_dict()
+
+    # Count document experts
+    if use_adapters:
+        for idx in range(len(all_expert_ids)):
+            doc_expert = int(all_expert_ids[idx])
+            doc_expert_counter[doc_expert] += 1
     
     model.eval()
     for d in tqdm.tqdm(data, total=len(data)):
@@ -114,9 +119,6 @@ def get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, 
         
         with torch.no_grad():
             q_embedding = model.query_encoder([d['text']])
-        
-        # Store query embedding for later use
-        query_embeddings[query_id] = q_embedding
         
         # Get query expert if using adapters
         query_expert = None
@@ -133,12 +135,6 @@ def get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, 
         bert_ids = [index_to_id[int(_id)] for _id in top_k]
         bert_scores = bert_scores[top_k]
         bert_run[query_id] = {doc_id: bert_scores[i].item() for i, doc_id in enumerate(bert_ids)}
-        
-        # Count document experts in top-1000
-        if use_adapters:
-            for idx in top_k:
-                doc_expert = int(all_expert_ids[idx])
-                doc_expert_counter[doc_expert] += 1
         
         # Analyze relevant documents
         relevants = set(relevants_dict.get(query_id, {}).keys())
@@ -178,17 +174,93 @@ def get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, 
                         'top1_relevant_expert': top1_relevant_expert
                     })
     
-    analysis_results = {
-        'relevance_counts': relevance_counts,
-        'doc_expert_counter': doc_expert_counter,
-        'query_expert_counter': query_expert_counter,
-        'matching_queries': matching_queries,
-        'mismatching_queries': mismatching_queries,
-        'queries_without_relevants': queries_without_relevants,
-        'k_values': k_values
-    }
-    print("KNN and Expert Distribution Analysis Results:")
-    print(analysis_results)
+    # Statistics
+    relevance_stats = {}
+    for k_val in k_values:
+        counts = np.array(relevance_counts[k_val])        
+        relevance_stats[k_val] = {
+            'mean': float(np.mean(counts)),
+            'total_queries': len(counts),
+            'queries_with_relevants': len(counts[counts > 0])
+        }
+    
+    # Log KNN and expert distribution analysis
+    if output_dir:
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Statistics log
+        with open(os.path.join(output_dir, f'{model_name}_knn_statistics.log'), 'w') as f:
+            # Matching queries
+            f.write(f"Total Matching Queries: {len(matching_queries)}\n")
+            f.write("=" * 50 + "\n")
+            for qid in matching_queries:
+                f.write(f"{qid}\n")
+            
+            # Mismatching queries
+            f.write(f"Total Mismatching Queries: {len(mismatching_queries)}\n")
+            f.write("=" * 50 + "\n")
+            for qid in mismatching_queries:
+                f.write(f"{qid}\n")
+            
+            # Queries without relevants
+            f.write(f"Total Queries Without Relevants: {len(queries_without_relevants)}\n")
+            f.write("=" * 50 + "\n")
+            for qid in queries_without_relevants:
+                f.write(f"{qid}\n")
+
+            f.write("KNN and Expert Distribution Analysis\n")
+            f.write("=" * 80 + "\n\n")
+            
+            for k_val in k_values:
+                stats = relevance_stats[k_val]
+                f.write(f"\nk={k_val}:\n")
+                f.write(f"  Mean:    {stats['mean']:.4f}\n")
+                f.write(f"  Total queries:         {stats['total_queries']}\n")
+                f.write(f"  Queries w/ relevants:  {stats['queries_with_relevants']}\n")
+            
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("EXPERT DISTRIBUTION\n")
+            f.write("-" * 80 + "\n")
+            f.write("\nDocument Expert Distribution:\n")
+            for expert_id, count in sorted(doc_expert_counter.items()):
+                f.write(f"  Expert {expert_id}: {count}\n")
+            
+            f.write("\nQuery Expert Distribution:\n")
+            for expert_id, count in sorted(query_expert_counter.items()):
+                f.write(f"  Expert {expert_id}: {count}\n")
+            
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("EXPERT MATCHING SUMMARY\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Matching queries (query expert = top relevant doc expert): {len(matching_queries)}\n")
+            f.write(f"Mismatching queries: {len(mismatching_queries)}\n")
+            f.write(f"Queries without relevants: {len(queries_without_relevants)}\n")
+            total_with_relevants = len(matching_queries) + len(mismatching_queries)
+            if total_with_relevants > 0:
+                match_rate = len(matching_queries) / total_with_relevants * 100
+                f.write(f"Match rate: {match_rate:.2f}%\n")
+    
+    # Print summary to console
+    print("\n" + "=" * 80)
+    print("KNN AND EXPERT DISTRIBUTION ANALYSIS SUMMARY")
+    print("=" * 80)
+    print(f"\nMatching queries: {len(matching_queries)}")
+    print(f"Mismatching queries: {len(mismatching_queries)}")
+    print(f"Queries without relevants: {len(queries_without_relevants)}")
+    
+    print("\nKNN:")
+    print("-" * 80)
+    for k_val in k_values:
+        stats = relevance_stats[k_val]
+        print(f"k={k_val:4d}: mean={stats['mean']:6.2f}")
+    
+    print("\nExpert Distribution:")
+    print("-" * 80)
+    print(f"Document experts: {dict(doc_expert_counter)}")
+    print(f"Query experts: {dict(query_expert_counter)}")
+    print("=" * 80 + "\n")
+
     return bert_run
     
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
@@ -231,26 +303,30 @@ def main(cfg: DictConfig):
     if cfg.model.adapters.use_adapters:
         if cfg.model.init.specialized_mode == "sbmoe_top1":
             model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt', weights_only=True))
-            print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
+            model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1'
+            print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
         elif cfg.model.init.specialized_mode == "sbmoe_all":
             model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt', weights_only=True))
-            print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
+            model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1'
+            print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
         elif cfg.model.init.specialized_mode == "random":
             model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random.pt', weights_only=True))
-            print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random.pt')
+            model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random'
+            print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random.pt')
     else:
         model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft.pt', weights_only=True))
-        print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft.pt')
+        model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft'
+        print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft.pt')
     
-    dv_cls = DeepViewClassifier(
-        hidden_size=cfg.model.init.embedding_size,
-        num_classes=cfg.model.adapters.num_experts,
-        device=cfg.model.init.device,
-    )
-    state_dict = torch.load(f'{cfg.dataset.output_dir}/dv_plots/deepview_cls.pt', map_location=cfg.model.init.device)
-    dv_cls.load_state_dict(state_dict)
-    dv_cls = dv_cls.to(cfg.model.init.device)
-    dv_cls.eval()
+    # dv_cls = DeepViewClassifier(
+    #     hidden_size=cfg.model.init.embedding_size,
+    #     num_classes=cfg.model.adapters.num_experts,
+    #     device=cfg.model.init.device,
+    # )
+    # state_dict = torch.load(f'{cfg.dataset.output_dir}/dv_plots/deepview_cls.pt', map_location=cfg.model.init.device)
+    # dv_cls.load_state_dict(state_dict)
+    # dv_cls = dv_cls.to(cfg.model.init.device)
+    # dv_cls.eval()
     
     doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
     with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
@@ -275,7 +351,7 @@ def main(cfg: DictConfig):
     all_doc_embeddings_np = np.load(np_embedding_path)
     all_expert_ids = np.load(expert_ids_path)
     ranx_qrels = Qrels.from_file(cfg.testing.qrels_path)
-    bert_run = get_full_bert_rank(data, model, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, cfg.model.adapters.use_adapters, 1000)
+    bert_run = get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, cfg.model.adapters.use_adapters, 1000, output_dir=cfg.dataset.logs_dir)
     ranx_run = Run(bert_run, 'FullRun')
     models = [ranx_run]
 

@@ -16,10 +16,9 @@ from sklearn.cluster import KMeans
 
 # Import from overcomplete library
 from overcomplete.sae.train import train_sae
-from overcomplete.sae.losses import mse_l1
 
 # Import local model
-from model.sae_models import TopKRAESAE
+from overcomplete.sae import TopKRAESAE
 from model.utils import seed_everything
 
 logger = logging.getLogger(__name__)

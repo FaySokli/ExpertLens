@@ -168,9 +168,14 @@ def main(cfg: DictConfig):
     dv_cls = dv_cls.to(cfg.model.init.device)
     dv_cls.eval()
     
-    doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
-    with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
-        id_to_index = json.load(f)
+    if cfg.model.adapters.use_adapters:
+        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
+        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
+            id_to_index = json.load(f)
+    else:
+        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_ft_fullrank.pt', weights_only=True).to(cfg.model.init.device)
+        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_ft_fullrank.json', 'r') as f:
+            id_to_index = json.load(f)
         
     data = Indxr(cfg.testing.query_path, key_id='_id')
     bert_run = get_full_bert_rank(data, model, doc_embedding, id_to_index, 1000)

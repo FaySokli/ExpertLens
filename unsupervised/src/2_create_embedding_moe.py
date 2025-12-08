@@ -132,11 +132,18 @@ def main(cfg: DictConfig):
     prefix = 'fullrank'
     logging.info(f'Embedded {index} documents. Saving embedding matrix in folder {cfg.testing.embedding_dir}.')
     os.makedirs(cfg.testing.embedding_dir, exist_ok=True)
-    torch.save(embedding_matrix, f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.pt')
+    if cfg.model.adapters.use_adapters:
+        torch.save(embedding_matrix, f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.pt')
+    else:
+        torch.save(embedding_matrix, f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_ft_{prefix}.pt')
         
     logging.info('Saving id_to_index file.')
-    with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.json', 'w') as f:
-        json.dump(id_to_index, f)
+    if cfg.model.adapters.use_adapters:
+        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.json', 'w') as f:
+            json.dump(id_to_index, f)
+    else:
+        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_ft_{prefix}.json', 'w') as f:
+            json.dump(id_to_index, f)
 
     tsne_data_dir = cfg.testing.embedding_dir  # reuse same dir
 

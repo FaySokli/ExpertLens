@@ -97,7 +97,7 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
     index_to_id = {ind: _id for _id, ind in id_to_index.items()}
     
     # knn and expert distributions
-    k_values = [1, 5, 10, 20, 50, 100, 200, 1000]
+    k_values = [1, 2, 5, 10, 20, 50, 100, 200, 1000]
     relevance_counts = {k: [] for k in k_values}
     doc_expert_counter = Counter()
     query_expert_counter = Counter()
@@ -150,6 +150,7 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
             topk_subset = bert_ids[:k_val]
             num_relevants = len([doc_id for doc_id in topk_subset if doc_id in relevants])
             relevance_counts[k_val].append(num_relevants)
+            # ipdb.set_trace()
         
         # Check query vs top-1 relevant expert matching
         if use_adapters:
@@ -177,11 +178,11 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
     # Statistics
     relevance_stats = {}
     for k_val in k_values:
-        counts = np.array(relevance_counts[k_val])        
+        precision = np.array(relevance_counts[k_val]) / k_val        
         relevance_stats[k_val] = {
-            'mean': float(np.mean(counts)),
-            'total_queries': len(counts),
-            'queries_with_relevants': len(counts[counts > 0])
+            'precision': float(np.mean(precision)),
+            'total_queries': len(precision),
+            'queries_with_relevants': len(precision[precision > 0])
         }
     
     # Log KNN and expert distribution analysis
@@ -215,7 +216,7 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
             for k_val in k_values:
                 stats = relevance_stats[k_val]
                 f.write(f"\nk={k_val}:\n")
-                f.write(f"  Mean:    {stats['mean']:.4f}\n")
+                f.write(f"  Precision:    {stats['precision']:.4f}\n")
                 f.write(f"  Total queries:         {stats['total_queries']}\n")
                 f.write(f"  Queries w/ relevants:  {stats['queries_with_relevants']}\n")
             
@@ -253,7 +254,7 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
     print("-" * 80)
     for k_val in k_values:
         stats = relevance_stats[k_val]
-        print(f"k={k_val:4d}: mean={stats['mean']:6.2f}")
+        print(f"k={k_val:4d}: precision={stats['precision']:6.2f}")
     
     print("\nExpert Distribution:")
     print("-" * 80)
@@ -328,9 +329,14 @@ def main(cfg: DictConfig):
     # dv_cls = dv_cls.to(cfg.model.init.device)
     # dv_cls.eval()
     
-    doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
-    with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
-        id_to_index = json.load(f)
+    if cfg.model.adapters.use_adapters:
+        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
+        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
+            id_to_index = json.load(f)
+    else:
+        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_ft_fullrank.pt', weights_only=True).to(cfg.model.init.device)
+        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_ft_fullrank.json', 'r') as f:
+            id_to_index = json.load(f)
         
     data = Indxr(cfg.testing.query_path, key_id='_id')
     ############################

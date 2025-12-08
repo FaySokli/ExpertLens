@@ -1,0 +1,11 @@
+__pycache__/
+.ipynb_checkpoints/
+nq*
+multi-domain*
+hotpotqa*
+nfcorpus*
+fiqa*
+msmarco*
+arguana*
+climate-fever*
+.hydra/

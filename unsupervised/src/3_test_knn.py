@@ -351,8 +351,14 @@ def main(cfg: DictConfig):
     prefix = "fullrank"
 
     # Load embeddings and expert_ids
-    np_embedding_path = os.path.join(np_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
-    expert_ids_path = os.path.join(np_data_dir, f"expert_ids_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+    if cfg.model.adapters.use_adapters:
+        print("EXPERTS")
+        np_embedding_path = os.path.join(np_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+        expert_ids_path = os.path.join(np_data_dir, f"expert_ids_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+    else:
+        print("NO EXPERTS")
+        np_embedding_path = os.path.join(np_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_ft_{prefix}.npy")
+        expert_ids_path = os.path.join(np_data_dir, f"expert_ids_{cfg.model.init.save_model}_ft_{prefix}.npy")
 
     all_doc_embeddings_np = np.load(np_embedding_path)
     all_expert_ids = np.load(expert_ids_path)

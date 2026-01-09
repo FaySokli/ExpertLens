@@ -148,11 +148,17 @@ def main(cfg: DictConfig):
     tsne_data_dir = cfg.testing.embedding_dir  # reuse same dir
 
     # Save expert IDs (as integers)
-    expert_ids_path = os.path.join(tsne_data_dir, f"expert_ids_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+    if cfg.model.adapters.use_adapters:
+        expert_ids_path = os.path.join(tsne_data_dir, f"expert_ids_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+    else:
+        expert_ids_path = os.path.join(tsne_data_dir, f"expert_ids_{cfg.model.init.save_model}_ft_{prefix}.npy")
     np.save(expert_ids_path, np.array(all_expert_ids))
 
     # Save embeddings
-    embedding_tsne_path = os.path.join(tsne_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+    if cfg.model.adapters.use_adapters:
+        embedding_tsne_path = os.path.join(tsne_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+    else:
+        embedding_tsne_path = os.path.join(tsne_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_ft_{prefix}.npy")
     np.save(embedding_tsne_path, torch.cat(all_doc_embeddings, dim=0).numpy())
     
 if __name__ == '__main__':

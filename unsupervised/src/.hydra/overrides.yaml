@@ -1,7 +1,0 @@
-- model=tinybert
-- dataset=msmarco
-- testing=trec20
-- model.adapters.use_adapters=True
-- model.adapters.num_experts=3
-- model.init.specialized_mode=sbmoe_all
-- model.init.device=cuda:0

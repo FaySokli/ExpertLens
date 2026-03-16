@@ -6,6 +6,7 @@ import numpy as np
 from omegaconf import DictConfig
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch import nn as nn
 import tqdm
 from torch import save, load
@@ -32,7 +33,9 @@ def train_dv_cls(embeddings, labels, model, optimizer, loss_fn, device, batch_si
 
         optimizer.zero_grad()
         logits = model(batch_embs)
-        loss = loss_fn(logits, batch_labels)
+        log_probs = F.log_softmax(logits, dim=1)
+        target_probs = F.one_hot(batch_labels, num_classes=logits.size(1)).float()
+        loss = loss_fn(log_probs, target_probs)
         loss.backward()
         optimizer.step()
 
@@ -58,7 +61,9 @@ def validate_dv_cls(val_embeddings, val_labels, model, loss_fn, batch_size, devi
             batch_labels = val_labels[start:end].to(device)
 
             logits = model(batch_embs)
-            loss = loss_fn(logits, batch_labels)
+            log_probs = F.log_softmax(logits, dim=1)
+            target_probs = F.one_hot(batch_labels, num_classes=logits.size(1)).float()
+            loss = loss_fn(log_probs, target_probs)
             total_loss += loss.item() * batch_embs.size(0)
 
     val_loss = total_loss / n_samples
@@ -82,11 +87,8 @@ def main(cfg: DictConfig) -> None:
     dv_dir = os.path.join(cfg.dataset.output_dir, 'dv_plots')
     os.makedirs(dv_dir, exist_ok=True)
 
-    # -------------------------------
-    # Load .npy files
-    # -------------------------------
     dv_data_dir = cfg.testing.embedding_dir
-    prefix = "fullrank"  # adjust if needed (e.g., rerank)
+    prefix = "fullrank" 
 
     embedding_dv_path = os.path.join(
         dv_data_dir,
@@ -107,9 +109,6 @@ def main(cfg: DictConfig) -> None:
         X_temp, y_temp, test_size=0.05, stratify=y_temp, random_state=42
     )
 
-    # -------------------------------
-    # Model, optimizer, loss
-    # -------------------------------
     device = torch.device(cfg.model.init.device if torch.cuda.is_available() else "cpu")
     model = DeepViewClassifier(cfg.model.init.embedding_size, cfg.model.adapters.num_experts, device=device)
     model = model.to(device)
@@ -119,35 +118,28 @@ def main(cfg: DictConfig) -> None:
         {'params': model.cls_5.parameters(), 'lr': cfg.training.lr}
     ])
 
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.KLDivLoss(reduction='batchmean')
 
-    # -------------------------------
-    # Training loop
-    # -------------------------------
     best_val_loss = float('inf')
     max_epoch = cfg.training.max_epoch
     batch_size = cfg.training.batch_size
 
     for epoch in tqdm.tqdm(range(max_epoch), leave=True):
-        # Train
         model.train()
         avg_train_loss = train_dv_cls(X_train, y_train, model, optimizer, loss_fn, device, batch_size)
         logging.info(f"TRAIN EPOCH: {epoch + 1:3d}, Average Loss: {avg_train_loss:.5e}")
 
-        # Validate
         model.eval()
         val_loss = validate_dv_cls(X_val, y_val, model, loss_fn, batch_size, device)
         logging.info(f"VAL EPOCH: {epoch + 1:3d}, Average Val Loss: {val_loss:.5e}")
 
-        # Save best model checkpoint
         if val_loss < best_val_loss:
             logging.info(f'Found new best cls model on epoch {epoch + 1}, new best validation loss {val_loss:.5e}')
             best_val_loss = val_loss
-            checkpoint_path = os.path.join(dv_dir, "deepview_cls2.pt")
+            checkpoint_path = os.path.join(dv_dir, "deepview_cls_experts6.pt")
             torch.save(model.state_dict(), checkpoint_path)
             logging.info(f'Saved checkpoint: {checkpoint_path}')
 
-    # Test
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
     test_loss = validate_dv_cls(X_test, y_test, model, loss_fn, batch_size, device)

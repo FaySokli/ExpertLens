@@ -1,13 +1,13 @@
 import json
 import logging
 import os
-import ipdb
 
 import hydra
 import torch
 import tqdm
 from indxr import Indxr
 from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 
 from model.models import MoEBiEncoder, DeepViewClassifier
@@ -15,78 +15,13 @@ from model.utils import seed_everything
 
 from ranx import Run, Qrels, compare
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.lines as mlines
-from sklearn.manifold import TSNE
-import random
-import numpy as np
-from mpl_toolkits.mplot3d import Axes3D
-
-from deepview.DeepViewIR import DeepViewIR
-from deepview.evaluate import evaluate_umap
-from deepview.evaluate import leave_one_out_knn_dist_err
-
 logger = logging.getLogger(__name__)
 
+# Query IDs for per-query analysis
+ANALYSIS_QIDS = [
+    "test1968", "test2932" ,"test3132"
+]
 
-def visualize_tsne(query_embedding, top_doc_embeddings, top_doc_ids, query_id, output_dir, experts_used, relevants, use_adapters=True):
-    all_embeddings = torch.cat([query_embedding, top_doc_embeddings], dim=0).cpu().numpy()
-    relevant_set = set(relevants)
-
-    tsne = TSNE(n_components=3, random_state=42, perplexity=30, init='pca')
-    embeddings_3d = tsne.fit_transform(all_embeddings)
-
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
-
-    ax.scatter(embeddings_3d[0, 0], embeddings_3d[0, 1], embeddings_3d[0, 2], 
-               c='black', label='query', marker='X', s=100)
-
-    color_map = plt.cm.tab10
-    marker_list = ['o', '^', 's', 'D', 'v', 'P', '*', 'X', '<', '>']
-
-    for i, (x, y, z) in enumerate(embeddings_3d[1:], start=1):
-        doc_id = top_doc_ids[i-1]
-        is_relevant = doc_id in relevant_set
-
-        if use_adapters:
-            expert_id = experts_used[i-1]
-            color = color_map(expert_id)
-            marker = marker_list[expert_id % len(marker_list)]
-        else:
-            color = 'blue'
-            marker = 'o'
-
-        if is_relevant:
-            ax.scatter(x, y, z, edgecolors='red', facecolors='none', s=120, linewidths=2,
-                       marker='o', label='relevant_docs' if i == 1 else "")
-        else:
-            ax.scatter(x, y, z, c=[color], marker=marker, alpha=0.6, s=40)
-
-    # Legend
-    handles = [mlines.Line2D([], [], color='black', marker='X', linestyle='None', markersize=10, label='query'),
-               mlines.Line2D([], [], color='red', marker='o', markerfacecolor='none', linestyle='None', markersize=10, label='relevant_docs')]
-
-    if use_adapters:
-        unique_experts = sorted(set(experts_used))
-        for expert_id in unique_experts:
-            handles.append(
-                mlines.Line2D([], [], color=color_map(expert_id), marker=marker_list[expert_id % len(marker_list)],
-                              linestyle='None', markersize=10, label=f'Expert {expert_id + 1}')
-            )
-
-    ax.legend(handles=handles, fontsize=20)
-    # ax.set_title(f"3D t-SNE: Query {query_id} and Top 1000 Docs")
-    plt.grid(True)
-    plt.tight_layout()
-
-    filename = f"tsne_query_{query_id}_3D_experts.png" if use_adapters else f"tsne_query_{query_id}_3D_NO_experts.png"
-    save_path = os.path.join(output_dir, filename)
-    plt.savefig(save_path, dpi=900)
-    plt.close()
-    print(f"Saved t-SNE plot: {save_path}")
 
 def get_full_bert_rank(data, model, doc_embedding, id_to_index, k=1000):
     bert_run = {}
@@ -94,27 +29,35 @@ def get_full_bert_rank(data, model, doc_embedding, id_to_index, k=1000):
     model.eval()
     for d in tqdm.tqdm(data, total=len(data)):
         with torch.no_grad():
-            # with torch.autocast(device_type=model.device):
             q_embedding = model.query_encoder([d['text']])
-        
+
         bert_scores = torch.einsum('xy, ly -> x', doc_embedding, q_embedding)
         index_sorted = torch.argsort(bert_scores, descending=True)
         top_k = index_sorted[:k]
         bert_ids = [index_to_id[int(_id)] for _id in top_k]
         bert_scores = bert_scores[top_k]
         bert_run[d['_id']] = {doc_id: bert_scores[i].item() for i, doc_id in enumerate(bert_ids)}
-        
-        
+
     return bert_run
-    
+
+
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     os.makedirs(cfg.dataset.output_dir, exist_ok=True)
     os.makedirs(cfg.dataset.logs_dir, exist_ok=True)
     os.makedirs(cfg.dataset.model_dir, exist_ok=True)
     os.makedirs(cfg.dataset.runs_dir, exist_ok=True)
-    
-    logging_file = f"{cfg.model.init.doc_model.replace('/','_')}_testing_biencoder.log"
+
+    dataset_name = HydraConfig.get().runtime.choices.get('testing', 'unknown')
+
+    # Optional: '+analysis.umap=true',...
+    run_text_analysis  = bool(OmegaConf.select(cfg, 'analysis.text',     default=False))
+    run_umap           = bool(OmegaConf.select(cfg, 'analysis.umap',     default=False))
+    run_deepview       = bool(OmegaConf.select(cfg, 'analysis.deepview', default=False))
+    run_corpus_metrics = bool(OmegaConf.select(cfg, 'analysis.corpus',   default=False))
+    query_ids_override = OmegaConf.select(cfg, 'analysis.query_ids',     default=None)
+
+    logging_file = f"{cfg.model.init.doc_model.replace('/','_')}_{dataset_name}_testing_biencoder.log"
     logging.basicConfig(
         filename=os.path.join(cfg.dataset.logs_dir, logging_file),
         filemode='a',
@@ -122,6 +65,17 @@ def main(cfg: DictConfig):
         datefmt='%Y-%m-%d %H:%M:%S',
         level=logging.INFO
     )
+
+    stats_logger = logging.getLogger('txt_stats')
+    stats_logger.setLevel(logging.INFO)
+    stats_logger.propagate = False
+    _stats_fh = logging.FileHandler(
+        os.path.join(cfg.dataset.logs_dir, f'txt_char_stats_{dataset_name}.log'), mode='a'
+    )
+    _stats_fh.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+    stats_logger.addHandler(_stats_fh)
 
     seed_everything(cfg.general.seed)
 
@@ -140,168 +94,194 @@ def main(cfg: DictConfig):
         normalize=cfg.model.init.normalize,
         specialized_mode=cfg.model.init.specialized_mode,
         pooling_mode=cfg.model.init.aggregation_mode,
-        use_adapters = cfg.model.adapters.use_adapters,
+        use_adapters=cfg.model.adapters.use_adapters,
         device=cfg.model.init.device
     )
-    
+
     if cfg.model.adapters.use_adapters:
-        if cfg.model.init.specialized_mode == "sbmoe_top1":
-            model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt', weights_only=True))
-            print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
-        elif cfg.model.init.specialized_mode == "sbmoe_all":
-            model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt', weights_only=True))
-            print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
+        if cfg.model.init.specialized_mode in ("sbmoe_top1", "sbmoe_all"):
+            ckpt = (
+                f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}'
+                f'_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt'
+            )
         elif cfg.model.init.specialized_mode == "random":
-            model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random.pt', weights_only=True))
-            print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random.pt')
+            ckpt = (
+                f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}'
+                f'_experts{cfg.model.adapters.num_experts}-random.pt'
+            )
+        else:
+            raise ValueError(f"Unknown specialized_mode: {cfg.model.init.specialized_mode}")
     else:
-        model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft.pt', weights_only=True))
-        print(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft.pt')
-    
-    dv_cls = DeepViewClassifier(
-        hidden_size=cfg.model.init.embedding_size,
-        num_classes=cfg.model.adapters.num_experts,
-        device=cfg.model.init.device,
-    )
-    state_dict = torch.load(f'{cfg.dataset.output_dir}/dv_plots/deepview_cls.pt', map_location=cfg.model.init.device)
-    dv_cls.load_state_dict(state_dict)
-    dv_cls = dv_cls.to(cfg.model.init.device)
-    dv_cls.eval()
-    
+        ckpt = (
+            f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}'
+            f'_experts{cfg.model.adapters.num_experts}-ft.pt'
+        )
+
+    model.load_state_dict(torch.load(ckpt, weights_only=True))
+    print(f"Loaded checkpoint: {ckpt}")
+
     if cfg.model.adapters.use_adapters:
-        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
-        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
+        doc_embedding = torch.load(
+            f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}'
+            f'_experts{cfg.model.adapters.num_experts}_fullrank.pt',
+            weights_only=True,
+        ).to(cfg.model.init.device)
+        with open(
+            f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}'
+            f'_experts{cfg.model.adapters.num_experts}_fullrank.json'
+        ) as f:
             id_to_index = json.load(f)
     else:
-        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_ft_fullrank.pt', weights_only=True).to(cfg.model.init.device)
-        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_ft_fullrank.json', 'r') as f:
+        doc_embedding = torch.load(
+            f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_ft_fullrank.pt',
+            weights_only=True,
+        ).to(cfg.model.init.device)
+        with open(
+            f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_ft_fullrank.json'
+        ) as f:
             id_to_index = json.load(f)
-        
+
     data = Indxr(cfg.testing.query_path, key_id='_id')
+
     bert_run = get_full_bert_rank(data, model, doc_embedding, id_to_index, 1000)
-        
-    # with open(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_biencoder.json', 'w') as f:
-    #     json.dump(bert_run, f)
-    
     ranx_qrels = Qrels.from_file(cfg.testing.qrels_path)
     ranx_run = Run(bert_run, 'FullRun')
-    models = [ranx_run]
 
     if cfg.model.adapters.use_adapters:
-        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-{cfg.model.init.specialized_mode}.json')
+        run_save_path = (
+            f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}'
+            f'_experts{cfg.model.adapters.num_experts}'
+            f'_biencoder-{cfg.model.init.specialized_mode}_{dataset_name}.json'
+        )
     else:
-        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-ft.json')
-    
-    evaluation_report = compare(ranx_qrels, models, ['map@100', 'mrr@10', 'recall@100', 'ndcg@10', 'precision@1', 'ndcg@3'])
+        run_save_path = (
+            f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}'
+            f'_experts{cfg.model.adapters.num_experts}'
+            f'_biencoder-ft_{dataset_name}.json'
+        )
+    ranx_run.save(run_save_path)
+
+    evaluation_report = compare(
+        ranx_qrels, [ranx_run],
+        ['map@100', 'mrr@10', 'recall@100', 'ndcg@10', 'precision@1', 'ndcg@3'],
+    )
     print(evaluation_report)
-    logging.info(f"Results for {cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder.json:\n{evaluation_report}")
+    logging.info(
+        f"Results for {cfg.model.init.save_model}"
+        f"_experts{cfg.model.adapters.num_experts}_biencoder_{dataset_name}.json:\n"
+        f"{evaluation_report}"
+    )
+    if not any([run_text_analysis, run_umap, run_deepview, run_corpus_metrics]):
+        return
 
-    ############################
-    # Create directory for t-SNE and DeepView plots
-    # qids = ["67316", "135802", "324585", "1051399", "1113256", "1127540", "1136962"]
-    tsne_dir = os.path.join(cfg.dataset.output_dir, 'tsne_plots')
-    os.makedirs(tsne_dir, exist_ok=True)
+    corpus_metrics = None
+    if run_corpus_metrics or run_text_analysis:
+        from text_analysis import run_corpus_analysis
+        corpus_metrics = run_corpus_analysis(
+            cfg.testing.corpus_path, stats_logger, dataset_name
+        )
 
-    dv_dir = os.path.join(cfg.dataset.output_dir, 'dv_plots')
-    os.makedirs(dv_dir, exist_ok=True)
+    all_expert_ids = None
+    if run_umap or run_deepview or run_text_analysis:
+        import numpy as np
+        prefix = "fullrank"
+        if cfg.model.adapters.use_adapters:
+            expert_ids_path = os.path.join(
+                cfg.testing.embedding_dir,
+                f"expert_ids_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy",
+            )
+        else:
+            expert_ids_path = os.path.join(
+                cfg.testing.embedding_dir,
+                f"expert_ids_{cfg.model.init.save_model}_ft_{prefix}.npy",
+            )
+        all_expert_ids = np.load(expert_ids_path)
 
-    # Load .npy embedding and label files
-    np_data_dir = cfg.testing.embedding_dir
-    prefix = "fullrank"
+    dv_cls = None
+    if run_deepview:
+        dv_cls = DeepViewClassifier(
+            hidden_size=cfg.model.init.embedding_size,
+            num_classes=cfg.model.adapters.num_experts,
+            device=cfg.model.init.device,
+        )
+        state_dict = torch.load(
+            f'{cfg.dataset.output_dir}/dv_plots/deepview_cls_experts6.pt',
+            map_location=cfg.model.init.device,
+        )
+        dv_cls.load_state_dict(state_dict)
+        dv_cls = dv_cls.to(cfg.model.init.device)
+        dv_cls.eval()
 
-    # Load embeddings and expert_ids
-    np_embedding_path = os.path.join(np_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
-    expert_ids_path = os.path.join(np_data_dir, f"expert_ids_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
+    corpus_index = None
+    if run_text_analysis:
+        corpus_index = Indxr(cfg.testing.corpus_path, key_id='_id')
 
-    all_doc_embeddings_np = np.load(np_embedding_path)
-    all_expert_ids = np.load(expert_ids_path)
+    query_ids = list(query_ids_override or ANALYSIS_QIDS)
+    umap_dir = os.path.join(cfg.dataset.output_dir, 'umap_plots')
+    dv_dir   = os.path.join(cfg.dataset.output_dir, 'dv_plots')
+    if run_umap:
+        os.makedirs(umap_dir, exist_ok=True)
+    if run_deepview:
+        os.makedirs(dv_dir, exist_ok=True)
 
-    ############################
-    # DeepView
-    ############################
-    for i in range(43):
-        import time
-        random.seed(time.time())  # Changes every run
-        random_query = random.choice(data)
-        query_id = random_query['_id']
-        print(f"Selected query ID: {query_id}")
+    relevants_dict = ranx_qrels.to_dict()
+
+    for query_id in query_ids:
+        print(f"\n{'='*60}\nProcessing query: {query_id}")
         query_data = data.get(query_id)
         if query_data is None:
-            print(f"Query ID {query_id} not found in data, skipping.")
+            print(f"  [SKIP] Query ID {query_id} not found in data.")
+            continue
 
-        # query
         model.eval()
         with torch.no_grad():
             query_embedding = model.query_encoder([query_data['text']]).to(cfg.model.init.device)
 
-        # Get top 1000 docs
         topk_ids = list(bert_run[query_id].keys())[:1000]
         topk_indices = [id_to_index[doc_id] for doc_id in topk_ids]
         top_doc_embeddings = doc_embedding[topk_indices]
         top_doc_expert_ids = [int(all_expert_ids[i]) for i in topk_indices]
-        relevants_dict = ranx_qrels.to_dict()
         relevants = set(relevants_dict.get(query_id, {}).keys())
         relevant_indices = [
-            i+1
+            i + 1
             for i, doc_id in enumerate(topk_ids)
             if doc_id in relevants
         ]
 
-        # Generate and save DeepView plot
-        all_embeddings = torch.cat([query_embedding, top_doc_embeddings], dim=0)
-        with torch.no_grad():
-            probs = dv_cls(all_embeddings.float().to(cfg.model.init.device)).softmax(dim=1).cpu().numpy()
-        relevant_set = set(relevants)
-        X = all_embeddings.detach().cpu().numpy()
-        y = np.argmax(probs, axis=1)
+        if run_umap:
+            from visualizations import visualize_umap
+            visualize_umap(
+                query_embedding, top_doc_embeddings, topk_ids,
+                query_id, umap_dir, top_doc_expert_ids, relevants,
+                use_adapters=cfg.model.adapters.use_adapters,
+            )
 
-        def pred_wrapper(x):
+
+        if run_deepview:
+            from visualizations import visualize_deepview
             with torch.no_grad():
-                x = torch.from_numpy(x).float().to(cfg.model.init.device)
-                pred = dv_cls(x).softmax(dim=1).cpu().numpy()
-            return pred
-        
-        # --- Deep View Parameters ----
-        use_case = "nlp"
-        classes = np.arange(cfg.model.adapters.num_experts)
-        batch_size = cfg.training.batch_size
-        max_samples = 1001  # including query
-        data_shape = (cfg.model.init.embedding_size,)
-        resolution = 100
-        N = 10
-        lam = .6
-        cmap = 'tab10'
-        metric = 'cosine'
-        disc_dist = (
-            False
-            if lam == 1
-            else True
-        )
-        # to make sure deepview.show is blocking,
-        # disable interactive mode
-        interactive = False
-        my_title = "MOE Enhanced DRM - Deepview"
+                query_expert_id = int(
+                    dv_cls(query_embedding.float().to(cfg.model.init.device))
+                    .argmax(-1).item()
+                )
+            true_expert_ids = [query_expert_id] + top_doc_expert_ids
+            visualize_deepview(
+                query_embedding, top_doc_embeddings, relevant_indices,
+                dv_cls, cfg.model.init.device,
+                cfg.model.adapters.num_experts,
+                cfg.training.batch_size,
+                cfg.model.init.embedding_size,
+                query_id, dataset_name, dv_dir,
+                true_expert_ids=true_expert_ids,
+            )
 
-        deepview = DeepViewIR(pred_wrapper, classes, max_samples, batch_size, data_shape,
-                                                N, lam, resolution, cmap, interactive, my_title, metric=metric,
-                                                disc_dist=disc_dist, relevant_docs=relevant_indices)
+        if run_text_analysis:
+            from text_analysis import run_per_query_text_analysis
+            run_per_query_text_analysis(
+                query_id, topk_ids, top_doc_expert_ids, corpus_index,
+                corpus_metrics, cfg.dataset.output_dir, dataset_name, stats_logger,
+            )
 
-
-        deepview.add_samples(X, y)
-        deepview.show()
-        # ipdb.set_trace()
-        fig = plt.gcf()
-        fig.savefig(os.path.join(dv_dir, f"TREC19 - deepview_query_{query_id}_experts{cfg.model.adapters.num_experts}.png"), dpi=300)
-        plt.close(fig)
-
-        q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_pred)
-        print('Lambda: %.2f - Pred. Val. Q_kNN: %.3f' % (lam, q_knn))
-
-        q_knn = leave_one_out_knn_dist_err(deepview.distances, deepview.y_true)
-        print('Lambda: %.2f - True Val. Q_kNN: %.3f' % (lam, q_knn))
-        # ipdb.set_trace()
-        # deepview.save_fig(os.path.join(dv_dir, f"deepview_query_{query_id}_experts{cfg.model.adapters.num_experts}.png"))
-    ############################
 
 if __name__ == '__main__':
     main()

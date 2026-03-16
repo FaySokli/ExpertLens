@@ -6,6 +6,7 @@ TESTING_DATASET=$DATASET
 python3 2_create_embedding_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_all
 echo "$DATASET MoE"
 python3 3_test_biencoder_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_all
+# Optional: add '+analysis.umap=true', '+analysis.deepview=true', '+analysis.text=true', '+analysis.corpus=true'
 
 
 DATASET=political_science
@@ -16,6 +17,7 @@ TESTING_DATASET=$DATASET
 python3 2_create_embedding_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_top1
 echo "$DATASET MoE"
 python3 3_test_biencoder_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_top1
+# Optional: add '+analysis.umap=true', '+analysis.deepview=true', '+analysis.text=true', '+analysis.corpus=true'
 
 
 DATASET=hotpotqa
@@ -26,6 +28,7 @@ TESTING_DATASET=$DATASET
 python3 2_create_embedding_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_all
 echo "$DATASET MoE"
 python3 3_test_biencoder_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_all
+# Optional: add '+analysis.umap=true', '+analysis.deepview=true', '+analysis.text=true', '+analysis.corpus=true'
 
 
 DATASET=nq-train
@@ -36,4 +39,4 @@ TESTING_DATASET=$DATASET
 python3 2_create_embedding_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_top1
 echo "$DATASET MoE"
 python3 3_test_biencoder_moe.py model=$MODEL dataset=$TESTING_DATASET testing=$TESTING_DATASET model.adapters.use_adapters=True model.adapters.num_experts=6 model.init.specialized_mode=sbmoe_top1
-
+# Optional: add '+analysis.umap=true', '+analysis.deepview=true', '+analysis.text=true', '+analysis.corpus=true'

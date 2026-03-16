@@ -8,7 +8,7 @@ import hydra
 import torch
 import tqdm
 from indxr import Indxr
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 
 from model.models import MoEBiEncoder
@@ -21,13 +21,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, use_adapters, k=1000, output_dir=None):
+def get_full_bert_rank(data, model, model_name, doc_embedding, softmaxed_logits, id_to_index, ranx_qrels, k=1000, device=None, output_dir=None):
     """
     Get ranking and compute knn + expert distributions
     """
     bert_run = {}
     index_to_id = {ind: _id for _id, ind in id_to_index.items()}
     
+    # knn and expert distributions
     k_values = [1, 2, 5, 10, 20, 50, 100, 200, 1000]
     relevance_counts = {k: [] for k in k_values}
     avg_relevant_scores = {k: [] for k in k_values}
@@ -36,11 +37,14 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
     matching_queries = []
     mismatching_queries = []
     queries_without_relevants = []
+    
     relevants_dict = ranx_qrels.to_dict()
-    if use_adapters:
-        for idx in range(len(all_expert_ids)):
-            doc_expert = int(all_expert_ids[idx])
-            doc_expert_counter[doc_expert] += 1
+
+    # Count document experts
+    for idx in range(len(softmaxed_logits)):
+        # ipdb.set_trace()
+        doc_expert = int(softmaxed_logits[idx].argmax().item())
+        doc_expert_counter[doc_expert] += 1
     
     model.eval()
 
@@ -48,22 +52,34 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
         query_id = d['_id']
         
         with torch.no_grad():
-            q_embedding = model.query_encoder([d['text']])
-        
-        query_expert = None
-        if use_adapters:
-            with torch.no_grad():
-                expert_probs = model.cls(q_embedding)  # [1, num_experts]
-                query_expert = torch.argmax(expert_probs, dim=1).item()
-                query_expert_counter[query_expert] += 1
-        
-        bert_scores = torch.einsum('xy, ly -> x', doc_embedding, q_embedding)
+            # with torch.autocast(device_type=device):
+            q_encoded = model.encoder_no_moe([d['text']])
+
+            if model.specialized_mode == 'densec3_top1':
+                q_embedding = model.embedder_q_inf(q_encoded).half()
+                q_embedding = torch.einsum('md,nm->nd', q_embedding.squeeze(0), softmaxed_logits.half()) + q_encoded
+                q_embedding = q_embedding.half()
+                
+                del q_encoded
+                torch.cuda.empty_cache()
+                doc_embedding = doc_embedding.to(device)
+                bert_scores = torch.einsum('nd,nd->n', doc_embedding, q_embedding)
+                # doc_embedding = doc_embedding.to("cpu")
+                
+            elif model.specialized_mode == 'densec3_w':
+                q_embedding = model.embedder_q(q_encoded).half()
+                doc_embedding = doc_embedding.to(device)
+                bert_scores = torch.einsum('xy, ly -> x', doc_embedding, q_embedding)
+                # doc_embedding = doc_embedding.to("cpu")
+
         index_sorted = torch.argsort(bert_scores, descending=True)
         top_k = index_sorted[:k]
         bert_ids = [index_to_id[int(_id)] for _id in top_k]
         bert_scores = bert_scores[top_k]
+        # ipdb.set_trace()
         bert_run[query_id] = {doc_id: bert_scores[i].item() for i, doc_id in enumerate(bert_ids)}
         
+        # Analyze relevant documents
         relevants = set(relevants_dict.get(query_id, {}).keys())
         bert_scores_list = bert_scores.tolist()
         if not relevants:
@@ -99,30 +115,36 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
             ).item()
             relevant_euclid_dists.append(dist)
 
+        # Store average for this query
         avg_rel_euclid = float(np.mean(relevant_euclid_dists))
+
+        # Get query expert if using adapters
+        top1_doc_id = bert_ids[0]
+        top1_doc_idx = id_to_index[top1_doc_id]
+        query_expert = int(softmaxed_logits[top1_doc_idx].argmax().item())
+        query_expert_counter[query_expert] += 1
         
-        # query vs top-1 relevant expert matching
-        if use_adapters:
-            top1_relevant_doc_id = None
-            top1_relevant_expert = None
-            
-            for doc_id in bert_ids:
-                if doc_id in relevants:
-                    top1_relevant_doc_id = doc_id
-                    doc_idx = id_to_index[doc_id]
-                    top1_relevant_expert = int(all_expert_ids[doc_idx])
-                    break
-            
-            if top1_relevant_expert is not None:
-                if query_expert == top1_relevant_expert:
-                    matching_queries.append(query_id)
-                else:
-                    mismatching_queries.append({
-                        'query_id': query_id,
-                        'query_expert': query_expert,
-                        'top1_relevant_doc_id': top1_relevant_doc_id,
-                        'top1_relevant_expert': top1_relevant_expert
-                    })
+        # Check query vs top-1 relevant expert matching
+        top1_relevant_doc_id = None
+        top1_relevant_expert = None
+        
+        for doc_id in bert_ids:
+            if doc_id in relevants:
+                top1_relevant_doc_id = doc_id
+                doc_idx = id_to_index[doc_id]
+                top1_relevant_expert = int(softmaxed_logits[doc_idx].argmax().item())
+                break
+        
+        if top1_relevant_expert is not None:
+            if query_expert == top1_relevant_expert:
+                matching_queries.append(query_id)
+            else:
+                mismatching_queries.append({
+                    'query_id': query_id,
+                    'query_expert': query_expert,
+                    'top1_relevant_doc_id': top1_relevant_doc_id,
+                    'top1_relevant_expert': top1_relevant_expert
+                })
     
     # Statistics
     avg_all_rel_euclid = float(np.mean(avg_rel_euclid))
@@ -138,26 +160,11 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
             'queries_with_relevants': len(precision[precision > 0])
         }
     
+    # Log KNN and expert distribution analysis
     if output_dir:
         import os
         os.makedirs(output_dir, exist_ok=True)
-        
         with open(os.path.join(output_dir, f'{model_name}_knn_statistics.log'), 'w') as f:
-            f.write(f"Total Matching Queries: {len(matching_queries)}\n")
-            f.write("=" * 50 + "\n")
-            for qid in matching_queries:
-                f.write(f"{qid}\n")
-            
-            f.write(f"Total Mismatching Queries: {len(mismatching_queries)}\n")
-            f.write("=" * 50 + "\n")
-            for qid in mismatching_queries:
-                f.write(f"{qid}\n")
-            
-            f.write(f"Total Queries Without Relevants: {len(queries_without_relevants)}\n")
-            f.write("=" * 50 + "\n")
-            for qid in queries_without_relevants:
-                f.write(f"{qid}\n")
-
             f.write("KNN and Expert Distribution Analysis\n")
             f.write("=" * 80 + "\n\n")
             f.write(f"Avg all-relevant Euclidean distance: {avg_all_rel_euclid:.16f}\n")
@@ -192,6 +199,7 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
                 match_rate = len(matching_queries) / total_with_relevants * 100
                 f.write(f"Match rate: {match_rate:.2f}%\n")
     
+    # Print summary to console
     print("\n" + "=" * 80)
     print("KNN AND EXPERT DISTRIBUTION ANALYSIS SUMMARY")
     print("=" * 80)
@@ -214,6 +222,14 @@ def get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_
     print("-" * 80)
     print(f"Document experts: {dict(doc_expert_counter)}")
     print(f"Query experts: {dict(query_expert_counter)}")
+
+    print("\nExpert Matching Summary:")
+    print("-" * 80)
+    print(f"Matching queries (query expert = top relevant doc expert): {len(matching_queries)}")
+    print(f"Mismatching queries: {len(mismatching_queries)}")
+    print(f"Queries without relevants: {len(queries_without_relevants)}")
+    if total_with_relevants > 0:
+        print(f"Match rate: {match_rate:.2f}%")
     print("=" * 80 + "\n")
 
     return bert_run
@@ -248,73 +264,49 @@ def main(cfg: DictConfig):
         doc_model=doc_model,
         tokenizer=tokenizer,
         num_classes=cfg.model.adapters.num_experts,
+        max_tokens=cfg.model.init.max_tokenizer_length,
         normalize=cfg.model.init.normalize,
         specialized_mode=cfg.model.init.specialized_mode,
-        pooling_mode=cfg.model.init.aggregation_mode,
+        pooling_mode=cfg.model.init.pooling_mode,
         use_adapters = cfg.model.adapters.use_adapters,
         device=cfg.model.init.device
     )
+    model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-{cfg.model.init.specialized_mode}.pt', weights_only=True))
+    model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-{cfg.model.init.specialized_mode}'
+    print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-{cfg.model.init.specialized_mode}.pt')
     
-    if cfg.model.adapters.use_adapters:
-        if cfg.model.init.specialized_mode == "sbmoe_top1":
-            model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt', weights_only=True))
-            model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1'
-            print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
-        elif cfg.model.init.specialized_mode == "sbmoe_all":
-            model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt', weights_only=True))
-            model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1'
-            print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-sbmoe_top1.pt')
-        elif cfg.model.init.specialized_mode == "random":
-            model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random.pt', weights_only=True))
-            model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random'
-            print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-random.pt')
-    else:
-        model.load_state_dict(torch.load(f'{cfg.dataset.model_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft.pt', weights_only=True))
-        model_name=f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft'
-        print(f'{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}-ft.pt')
+    torch.set_grad_enabled(False)
+    doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True) #.to("cpu")
+    doc_embedding = doc_embedding.half()
+
+    doc_logits = Indxr(cfg.testing.corpus_logits, key_id='_id')
+    logits_map = {doc['_id']: doc['logits'] for doc in doc_logits}
+    softmax_logits_map = {
+    _id: torch.softmax(torch.tensor(logits, dtype=torch.float32)/10, dim=-1).to(cfg.model.init.device)
+    for _id, logits in logits_map.items()
+    }
     
+    with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
+        id_to_index = json.load(f)
     
-    if cfg.model.adapters.use_adapters:
-        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
-        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
-            id_to_index = json.load(f)
-    else:
-        doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_ft_fullrank.pt', weights_only=True).to(cfg.model.init.device)
-        with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_ft_fullrank.json', 'r') as f:
-            id_to_index = json.load(f)
-        
+    # with open(cfg.testing.bm25_run_path, 'r') as f:
+    #     bm25_run = json.load(f)
+
+    index_to_id = {ind: _id for _id, ind in id_to_index.items()}
+    sorted_doc_ids = [index_to_id[i] for i in range(len(index_to_id))]
+    sorted_indices = [id_to_index[doc_id] for doc_id in sorted_doc_ids]
+    doc_embedding_sorted = doc_embedding[sorted_indices] #.to("cpu")
+    softmaxed_logits = torch.stack([softmax_logits_map.get(doc_id) for doc_id in sorted_doc_ids])
+    del softmax_logits_map, doc_embedding, doc_logits, logits_map
+    torch.cuda.empty_cache()
     data = Indxr(cfg.testing.query_path, key_id='_id')
-
-    ############################
-    tsne_dir = os.path.join(cfg.dataset.output_dir, 'tsne_plots')
-    os.makedirs(tsne_dir, exist_ok=True)
-
-    dv_dir = os.path.join(cfg.dataset.output_dir, 'dv_plots')
-    os.makedirs(dv_dir, exist_ok=True)
-
-    np_data_dir = cfg.testing.embedding_dir
-    prefix = "fullrank"
-
-    if cfg.model.adapters.use_adapters:
-        print("EXPERTS")
-        np_embedding_path = os.path.join(np_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
-        expert_ids_path = os.path.join(np_data_dir, f"expert_ids_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_{prefix}.npy")
-    else:
-        print("NO EXPERTS")
-        np_embedding_path = os.path.join(np_data_dir, f"doc_embeddings_{cfg.model.init.save_model}_ft_{prefix}.npy")
-        expert_ids_path = os.path.join(np_data_dir, f"expert_ids_{cfg.model.init.save_model}_ft_{prefix}.npy")
-
-    all_doc_embeddings_np = np.load(np_embedding_path)
-    all_expert_ids = np.load(expert_ids_path)
+    
     ranx_qrels = Qrels.from_file(cfg.testing.qrels_path)
-    bert_run = get_full_bert_rank(data, model, model_name, doc_embedding, id_to_index, all_expert_ids, ranx_qrels, cfg.model.adapters.use_adapters, 1000, output_dir=cfg.dataset.logs_dir)
+    bert_run = get_full_bert_rank(data, model, model_name, doc_embedding_sorted, softmaxed_logits, id_to_index, ranx_qrels, 1000, cfg.model.init.device, output_dir=cfg.dataset.logs_dir)
     ranx_run = Run(bert_run, 'FullRun')
     models = [ranx_run]
 
-    if cfg.model.adapters.use_adapters:
-        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-{cfg.model.init.specialized_mode}.json')
-    else:
-        ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-ft.json')
+    ranx_run.save(f'{cfg.dataset.runs_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_biencoder-{cfg.model.init.specialized_mode}.json')
     
     evaluation_report = compare(ranx_qrels, models, ['map@100', 'mrr@10', 'recall@100', 'ndcg@10', 'precision@1', 'ndcg@3'])
     print(evaluation_report)

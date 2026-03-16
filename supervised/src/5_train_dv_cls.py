@@ -6,172 +6,175 @@ import hydra
 from indxr import Indxr
 import numpy as np
 from omegaconf import DictConfig
-import pandas as pd
 import torch
-from torch import nn as nn
+from torch import nn
 import tqdm
-from torch import save, load
 from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
-
 
 from model.models import DeepViewClassifier
 
 logger = logging.getLogger(__name__)
 
-def train_dv_cls(embeddings, labels, model, optimizer, loss_fn, device, batch_size):
+def train_dv_cls(embeddings, teacher_logits, model, optimizer, loss_fn, device, batch_size, temperature):
     n_samples = embeddings.size(0)
-    total_loss, correct, total = 0.0, 0, 0
+    total_loss = 0.0
 
     indices = torch.randperm(n_samples)
-    embeddings_shuffled = embeddings[indices]
-    labels_shuffled = labels[indices]
+    embeddings = embeddings[indices]
+    teacher_logits = teacher_logits[indices]
+
+    total_correct = 0
 
     for start in tqdm.trange(0, n_samples, batch_size):
         end = min(start + batch_size, n_samples)
-        batch_embs = embeddings_shuffled[start:end].to(device)
-        batch_labels = labels_shuffled[start:end].to(device)
+        batch_embs = embeddings[start:end].to(device)
+        batch_logits = teacher_logits[start:end].to(device)
 
         optimizer.zero_grad()
-        logits = model(batch_embs)
-        loss = loss_fn(logits, batch_labels)
+
+        student_logits = model(batch_embs)
+
+        student_log_probs = torch.log_softmax(student_logits / temperature, dim=1)
+        teacher_probs = torch.softmax(batch_logits / temperature, dim=1)
+
+        loss = loss_fn(student_log_probs, teacher_probs) * (temperature ** 2)
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item() * batch_embs.size(0)
-        preds = logits.argmax(dim=1)
-        correct += (preds == batch_labels).sum().item()
-        total += batch_labels.size(0)
+        total_correct += (student_logits.argmax(dim=1) == batch_logits.argmax(dim=1)).sum().item()
 
-    train_loss = total_loss / total
-    train_acc = correct / total
-    print(f"AVG Loss: {train_loss:.4f}, Acc: {train_acc:.4f}")
+    avg_loss = total_loss / n_samples
+    accuracy = total_correct / n_samples
+    print(f"AVG Train KL Loss: {avg_loss:.6f} | Accuracy: {accuracy:.4f}")
+    return avg_loss
 
-    return train_loss
-    
-def validate_dv_cls(val_embeddings, val_labels, model, loss_fn, batch_size, device):
-    n_samples = val_embeddings.size(0)
+
+def validate_dv_cls(
+    embeddings, teacher_logits, model,
+    loss_fn, batch_size, device, temperature
+):
+    n_samples = embeddings.size(0)
     total_loss = 0.0
+
+    total_correct = 0
 
     with torch.no_grad():
         for start in range(0, n_samples, batch_size):
             end = min(start + batch_size, n_samples)
-            batch_embs = val_embeddings[start:end].to(device)
-            batch_labels = val_labels[start:end].to(device)
+            batch_embs = embeddings[start:end].to(device)
+            batch_logits = teacher_logits[start:end].to(device)
 
-            logits = model(batch_embs)
-            loss = loss_fn(logits, batch_labels)
+            student_logits = model(batch_embs)
+
+            student_log_probs = torch.log_softmax(student_logits / temperature, dim=1)
+            teacher_probs = torch.softmax(batch_logits / temperature, dim=1)
+
+            loss = loss_fn(student_log_probs, teacher_probs) * (temperature ** 2)
             total_loss += loss.item() * batch_embs.size(0)
+            total_correct += (student_logits.argmax(dim=1) == batch_logits.argmax(dim=1)).sum().item()
 
-    val_loss = total_loss / n_samples
-    print(f"AVG Val Loss: {val_loss:.4f}")
-    return val_loss
+    avg_loss = total_loss / n_samples
+    accuracy = total_correct / n_samples
+    print(f"AVG Val KL Loss: {avg_loss:.6f} | Accuracy: {accuracy:.4f}")
+    return avg_loss
+
 
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main(cfg: DictConfig):
+
     os.makedirs(cfg.dataset.output_dir, exist_ok=True)
     os.makedirs(cfg.dataset.logs_dir, exist_ok=True)
-    os.makedirs(cfg.dataset.model_dir, exist_ok=True)
-    os.makedirs(cfg.dataset.runs_dir, exist_ok=True)
 
-    logging_file = f"{cfg.model.init.doc_model.replace('/','_')}_training_dv_cls.log"
-    logging.basicConfig(filename=os.path.join(cfg.dataset.logs_dir, logging_file),
-                        filemode='a',
-                        format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
-                        datefmt='%Y-%m-%d %H:%M:%S',
-                        level=logging.INFO)
-
-    dv_dir = os.path.join(cfg.dataset.output_dir, 'dv_plots')
-    os.makedirs(dv_dir, exist_ok=True)
-
-    # -------------------------------
-    # Load doc embeddings and expert ids
-    # -------------------------------
-    doc_embedding = torch.load(f'{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt', weights_only=True).to(cfg.model.init.device)
-    # doc_embedding = doc_embedding.half()
-
-    #####################################
-    doc_labels = Indxr(cfg.testing.corpus_labels, key_id='_id')
-    labels_map = {str(doc['_id']): int(doc['category']) for doc in doc_labels}
-    #####################################
-    
-    with open(f'{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json', 'r') as f:
-        id_to_index = json.load(f)
-
-    index_to_id = {ind: _id for _id, ind in id_to_index.items()}
-    sorted_doc_ids = [index_to_id[i] for i in range(len(index_to_id))]
-    sorted_indices = [id_to_index[doc_id] for doc_id in sorted_doc_ids]
-    doc_embedding_sorted = doc_embedding[sorted_indices]
-    del doc_embedding
-
-    label_list = [int(labels_map[doc_id]) for doc_id in sorted_doc_ids]
-    labels_tensor = torch.tensor(label_list, dtype=torch.long)
-
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        doc_embedding_sorted, labels_tensor,
-        test_size=0.2,
-        stratify=labels_tensor,
-        random_state=42
-)
-
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp,
-        test_size=0.05,
-        stratify=y_temp,
-        random_state=42
+    logging.basicConfig(
+        filename=os.path.join(cfg.dataset.logs_dir, "train_dv_cls_logits.log"),
+        filemode="a",
+        format="%(asctime)s %(levelname)s %(message)s",
+        level=logging.INFO,
     )
 
-    # -------------------------------
-    # Model, optimizer, loss
-    # -------------------------------
-    model = DeepViewClassifier(cfg.model.init.embedding_size, cfg.model.adapters.num_experts, device=cfg.model.init.device)
-    model = model.to(cfg.model.init.device)
+    dv_dir = os.path.join(cfg.dataset.output_dir, "dv_plots")
+    os.makedirs(dv_dir, exist_ok=True)
 
-    optimizer = AdamW([
-        {'params': model.cls_4.parameters(), 'lr': cfg.training.lr},
-        {'params': model.cls_5.parameters(), 'lr': cfg.training.lr}
-    ])
+    device = cfg.model.init.device
+    temperature = cfg.training.get("distill_temperature", 10.0)
 
-    loss_fn = nn.CrossEntropyLoss()
+    doc_embedding = torch.load(
+        f"{cfg.testing.embedding_dir}/{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.pt",
+        weights_only=True
+    ).float()
 
-    # -------------------------------
-    # Training loop
-    # -------------------------------
-    best_val_loss = float('inf')
-    max_epoch = cfg.training.max_epoch
-    batch_size = cfg.training.batch_size
+    doc_logits = Indxr(cfg.testing.corpus_logits, key_id="_id")
+    logits_map = {
+        str(doc["_id"]): torch.tensor(doc["logits"], dtype=torch.float32)
+        for doc in doc_logits
+    }
 
-    for epoch in tqdm.tqdm(range(max_epoch), leave=True):
-        # Train
+    with open(
+        f"{cfg.testing.embedding_dir}/id_to_index_{cfg.model.init.save_model}_experts{cfg.model.adapters.num_experts}_fullrank.json",
+        "r"
+    ) as f:
+        id_to_index = json.load(f)
+
+    index_to_id = {v: k for k, v in id_to_index.items()}
+    sorted_doc_ids = [index_to_id[i] for i in range(len(index_to_id))]
+    sorted_indices = [id_to_index[_id] for _id in sorted_doc_ids]
+
+    X = doc_embedding[sorted_indices]
+    Y = torch.stack([logits_map[_id] for _id in sorted_doc_ids])
+
+    del doc_embedding, doc_logits, logits_map
+
+    X_train, X_tmp, Y_train, Y_tmp = train_test_split(
+        X, Y, test_size=0.2, random_state=42
+    )
+
+    X_val, X_test, Y_val, Y_test = train_test_split(
+        X_tmp, Y_tmp, test_size=0.05, random_state=42
+    )
+
+    model = DeepViewClassifier(
+        cfg.model.init.embedding_size,
+        cfg.model.adapters.num_experts,
+        device=device
+    ).to(device)
+
+    optimizer = AdamW(model.parameters(), lr=cfg.training.lr)
+    loss_fn = nn.KLDivLoss(reduction="batchmean")
+    best_val_loss = float("inf")
+
+    for epoch in range(cfg.training.max_epoch):
+        print(f"\nEpoch {epoch + 1}")
+
         model.train()
-        avg_train_loss = train_dv_cls(X_train, y_train, model, optimizer, loss_fn, cfg.model.init.device, batch_size)
-        logging.info(f"TRAIN EPOCH: {epoch + 1:3d}, Average Loss: {avg_train_loss:.5e}")
+        train_loss = train_dv_cls(
+            X_train, Y_train, model, optimizer,
+            loss_fn, device, cfg.training.batch_size, temperature
+        )
 
-        # Validate
         model.eval()
-        val_loss = validate_dv_cls(X_val, y_val, model, loss_fn, batch_size, cfg.model.init.device)
-        logging.info(f"VAL EPOCH: {epoch + 1:3d}, Average Val Loss: {val_loss:.5e}")
+        val_loss = validate_dv_cls(
+            X_val, Y_val, model,
+            loss_fn, cfg.training.batch_size, device, temperature
+        )
 
-        # Save best model checkpoint
         if val_loss < best_val_loss:
-            logging.info(f'Found new best cls model on epoch {epoch + 1}, new best validation loss {val_loss:.5e}')
             best_val_loss = val_loss
-            checkpoint_path = os.path.join(dv_dir, "deepview_cls.pt")
-            torch.save(model.state_dict(), checkpoint_path)
-            logging.info(f'Saved checkpoint: {checkpoint_path}')
+            ckpt = os.path.join(dv_dir, "deepview_cls.pt")
+            torch.save(model.state_dict(), ckpt)
+            print(f"Saved best model → {ckpt}")
 
-    # Test
-    model.load_state_dict(torch.load(checkpoint_path, map_location=cfg.model.init.device))
+    model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
-    test_loss = validate_dv_cls(X_test, y_test, model, loss_fn, batch_size, cfg.model.init.device)
 
-    with torch.no_grad():
-        logits = model(X_test.to(cfg.model.init.device))
-        preds = logits.argmax(dim=1).cpu()
-        test_acc = (preds == y_test).float().mean().item()
+    test_loss = validate_dv_cls(
+        X_test, Y_test, model,
+        loss_fn, cfg.training.batch_size, device, temperature
+    )
 
-    logging.info(f"TEST RESULTS -> Loss: {test_loss:.5e}, Accuracy: {test_acc:.4f}")
-    print(f"TEST RESULTS -> Loss: {test_loss:.5e}, Accuracy: {test_acc:.4f}")
+    print(f"\nFINAL TEST KL LOSS: {test_loss:.6f}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
